@@ -782,7 +782,7 @@ subroutine accumulate_input_1(IST, dt, G, IG, CS)
 
   FW_in(:,:) = 0.0 ; salt_in(:,:) = 0.0 ; heat_in(:,:) = 0.0
 
-!$OMP parallel do default(none) shared(isc,iec,jsc,jec,ncat,IST,CS,enth_units,dt) &
+!$OMP parallel do default(none) shared(isc,iec,jsc,jec,ncat,IST,CS,enth_units,dt,FIA) &
 !$OMP                          private(area_pt,Flux_SW)
   do j=jsc,jec ; do k=1,ncat ; do i=isc,iec
     area_pt = IST%part_size(i,j,k)
@@ -834,8 +834,8 @@ subroutine accumulate_input_2(IST, part_size, dt, G, IG, CS)
   ! as these are not yet known.
 
   call get_SIS2_thermo_coefs(IST%ITV, enthalpy_units=enth_units, Latent_fusion=LI)
-!$OMP parallel do default(none) shared(isc,iec,jsc,jec,i_off,j_off,CS,dt,Ice,IST,&
-!$OMP                                  enth_units, LI) &
+!$OMP parallel do default(none) shared(isc,iec,jsc,jec,CS,dt,IST,&
+!$OMP                                  enth_units, LI, FIA,IOF) &
 !$OMP                          private(area_pt)
   do j=jsc,jec ; do i=isc,iec
     ! Runoff and calving are passed directly on to the ocean.
@@ -855,7 +855,7 @@ subroutine accumulate_input_2(IST, part_size, dt, G, IG, CS)
   ! The terms that are added here include surface fluxes that will be passed
   ! directly on into the ocean.
 !$OMP parallel do default(none) shared(isc,iec,jsc,jec,ncat,part_size,IST,CS,dt,enth_units)&
-!$OMP                          private(area_pt,pen_frac,Flux_SW)
+!$OMP                          private(area_pt,pen_frac,Flux_SW,FIA)
     do j=jsc,jec ; do k=0,ncat ; do i=isc,iec
       area_pt = part_size(i,j,k)
       pen_frac = 1.0 ; if (k>0) pen_frac = IST%sw_abs_ocn(i,j,k)

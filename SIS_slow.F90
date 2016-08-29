@@ -140,7 +140,7 @@ subroutine post_flux_diagnostics(IST, G, IG, Idt_slow)
   if (FIA%id_evap>0) call post_avg(FIA%id_evap, FIA%flux_q_top, IST%part_size, &
                                  IST%diag, G=G)
   if (FIA%id_sw>0) then
-!$OMP parallel do default(none) shared(isc,iec,jsc,jec,ncat,tmp2d,IST)
+!$OMP parallel do default(none) shared(isc,iec,jsc,jec,ncat,tmp2d,IST,FIA)
     do j=jsc,jec
       do i=isc,iec ; tmp2d(i,j) = 0.0 ; enddo
       do k=0,ncat ; do i=isc,iec
@@ -160,7 +160,7 @@ subroutine post_flux_diagnostics(IST, G, IG, Idt_slow)
   if (FIA%id_lwdn>0) call post_data(FIA%id_lwdn, FIA%lwdn, IST%diag)
   if (FIA%id_swdn>0) call post_data(FIA%id_swdn, FIA%swdn, IST%diag)
   if (FIA%id_sw_vis>0) then
-!$OMP parallel do default(none) shared(isc,iec,jsc,jec,ncat,tmp2d,IST)
+!$OMP parallel do default(none) shared(isc,iec,jsc,jec,ncat,tmp2d,IST,FIA)
     do j=jsc,jec
       do i=isc,iec ; tmp2d(i,j) = 0.0 ; enddo
       do k=0,ncat ; do i=isc,iec
@@ -483,7 +483,7 @@ subroutine update_ice_model_slow(IST, icebergs_CS, G, IG)
   endif
 !$OMP parallel do default(none) shared(isd,ied,jsd,jed,WindStr_x_A,WindStr_y_A,  &
 !$OMP                                  ice_cover,ice_free,WindStr_x_ocn_A,       &
-!$OMP                                  WindStr_y_ocn_A)                          &
+!$OMP                                  WindStr_y_ocn_A, FIA)                     &
 !$OMP                           private(I_wts)
   do j=jsd,jed
     do i=isd,ied
@@ -811,7 +811,7 @@ subroutine update_ice_model_slow(IST, icebergs_CS, G, IG)
   call enable_SIS_averaging(dt_slow, IST%Time, IST%diag)
 
   ! Set appropriate surface quantities in categories with no ice.  Change <1e-10 to == 0?
-!$OMP parallel do default(none) shared(isc,iec,jsc,jec,ncat,IST)
+!$OMP parallel do default(none) shared(isc,iec,jsc,jec,ncat,IST,OSS)
   do j=jsc,jec ; do k=1,ncat ; do i=isc,iec ; if (IST%part_size(i,j,k)<1e-10) &
     IST%t_surf(i,j,k) = T_0degC + T_Freeze(OSS%s_surf(i,j),IST%ITV)
   enddo ; enddo ; enddo
@@ -1038,7 +1038,7 @@ subroutine set_ocean_top_stress_Bgrid(IOF, windstr_x_water, windstr_y_water, &
 
   !   Copy and interpolate the ice-ocean stress_Bgrid.  This code is slightly
   ! complicated because there are 3 different staggering options supported.
-!$OMP parallel default(none) shared(isc,iec,jsc,jec,ncat,G,                    &
+!$OMP parallel default(none) shared(isc,iec,jsc,jec,ncat,G,IOF,                &
 !$OMP                               part_size,windstr_x_water,windstr_y_water, &
 !$OMP                               str_ice_oce_x,str_ice_oce_y)               &
 !$OMP                       private(ps_vel)
@@ -1141,7 +1141,7 @@ subroutine set_ocean_top_stress_Cgrid(IOF, windstr_x_water, windstr_y_water, &
 
   !   Copy and interpolate the ice-ocean stress_Cgrid.  This code is slightly
   ! complicated because there are 3 different staggering options supported.
-!$OMP parallel default(none) shared(isc,iec,jsc,jec,ncat,G,    &
+!$OMP parallel default(none) shared(isc,iec,jsc,jec,ncat,G,IOF,    &
 !$OMP                               part_size,windstr_x_water,windstr_y_water, &
 !$OMP                               str_ice_oce_x,str_ice_oce_y)               &
 !$OMP                       private(ps_vel)
@@ -1402,7 +1402,7 @@ subroutine SIS2_thermodynamics(IST, IOF, G, IG)
     enth_prev(:,:,:) = 0.0 ; heat_in(:,:,:) = 0.0
     enth_prev_col(:,:) = 0.0 ; heat_in_col(:,:) = 0.0 ; enth_mass_in_col(:,:) = 0.0
 !$OMP parallel do default(none) shared(isc,iec,jsc,jec,ncat,IST,enth_prev,G,I_Nk, &
-!$OMP                                  heat_in_col,dt_slow,enth_prev_col,NkIce)
+!$OMP                                  heat_in_col,dt_slow,enth_prev_col,NkIce,FIA)
     do j=jsc,jec
       do k=1,ncat ; do i=isc,iec ; if (IST%mH_ice(i,j,k) > 0.0) then
         enth_prev(i,j,k) = IST%mH_snow(i,j,k) * IST%enth_snow(i,j,k,1)
@@ -1441,7 +1441,7 @@ subroutine SIS2_thermodynamics(IST, IOF, G, IG)
   salt_change(:,:) = 0.0
   h2o_change(:,:) = 0.0
 !$OMP parallel default(none) shared(isc,iec,jsc,jec,ncat,G,IST,salt_change,kg_H_Nk, &
-!$OMP                               h2o_change,NkIce,IG)
+!$OMP                               h2o_change,NkIce,IG,IOF,FIA)
   if (IST%ice_rel_salin <= 0.0) then
 !$OMP do
     do j=jsc,jec ; do m=1,NkIce ; do k=1,ncat ; do i=isc,iec
@@ -1492,7 +1492,8 @@ subroutine SIS2_thermodynamics(IST, IOF, G, IG)
 !$OMP parallel do default(none) shared(isc,iec,jsc,jec,ncat,G,IST,S_col0,NkIce,S_col, &
 !$OMP                                  dt_slow,snow_to_ice,heat_in,I_NK,enth_units,   &
 !$OMP                                  enth_prev,enth_mass_in_col,Idt_slow,bsnk,      &
-!$OMP                                  salt_change,net_melt,kg_H_nk,LatHtFus,LatHtVap,IG) &
+!$OMP                                  salt_change,net_melt,kg_H_nk,LatHtFus,LatHtVap,&
+!$OMP                                  IG,OSS,FIA,IOF) &
 !$OMP                          private(mass_prev,enthalpy,enthalpy_ocean,Salin,     &
 !$OMP                                  heat_to_ocn,h2o_ice_to_ocn,h2o_ocn_to_ice,   &
 !$OMP                                  evap_from_ocn,salt_to_ice,bablt,enth_evap,   &
@@ -1622,7 +1623,7 @@ subroutine SIS2_thermodynamics(IST, IOF, G, IG)
 !$OMP parallel do default(none) shared(isc,iec,jsc,jec,ncat,G,IG,IST,S_col0,NkIce,S_col, &
 !$OMP                                  dt_slow,snow_to_ice,heat_in,I_NK,enth_units,   &
 !$OMP                                  enth_prev,enth_mass_in_col,Idt_slow,bsnk,      &
-!$OMP                                  salt_change,net_melt,kg_h_Nk,LatHtFus)         &
+!$OMP                                  salt_change,net_melt,kg_h_Nk,LatHtFus,OSS)     &
 !$OMP                          private(mass_prev,enthalpy,enthalpy_ocean,Salin,     &
 !$OMP                                  heat_to_ocn,h2o_ice_to_ocn,h2o_ocn_to_ice,   &
 !$OMP                                  evap_from_ocn,salt_to_ice,bablt,enth_evap,   &
@@ -1833,7 +1834,7 @@ subroutine SIS2_thermodynamics(IST, IOF, G, IG)
   if (IST%column_check) then
     enth_col(:,:) = 0.0
     ! Add back any frazil that has not been used yet.
-!$OMP parallel do default(none) shared(isc,iec,jsc,jec,heat_in_col,IST,dt_slow)
+!$OMP parallel do default(none) shared(isc,iec,jsc,jec,heat_in_col,IST,dt_slow,IOF)
     do j=jsc,jec ; do i=isc,iec
       heat_in_col(i,j) = heat_in_col(i,j) + IST%frazil(i,j) + IOF%flux_t_ocn_top(i,j)*dt_slow
     enddo ; enddo
@@ -1882,7 +1883,7 @@ subroutine SIS2_thermodynamics(IST, IOF, G, IG)
     enddo ; enddo ; enddo ; enddo
   endif
 !$OMP parallel do default(none) shared(isc,iec,jsc,jec,ncat,IST,G,h2o_change, &
-!$OMP                                  salt_change,Idt_slow,IG) &
+!$OMP                                  salt_change,Idt_slow,IG,IOF) 
   do j=jsc,jec
     do k=1,ncat ; do i=isc,iec
       h2o_change(i,j) = h2o_change(i,j) + IST%part_size(i,j,k) * &

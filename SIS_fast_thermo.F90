@@ -145,7 +145,7 @@ subroutine sum_top_quantities ( Ice, IST, Atmos_boundary_fluxes, flux_u, flux_v,
 !$OMP parallel do default(none) shared(isc,iec,jsc,jec,ncat,IST,flux_u,flux_v,flux_t, &
 !$OMP                                  flux_q,flux_sw_nir_dir,flux_sw_nir_dif,        &
 !$OMP                                  flux_sw_vis_dir,flux_sw_vis_dif,flux_lw,       &
-!$OMP                                  lprec,fprec,flux_lh)
+!$OMP                                  lprec,fprec,flux_lh,FIA)
   do j=jsc,jec ; do k=0,ncat ; do i=isc,iec
     FIA%flux_u_top(i,j,k)  = FIA%flux_u_top(i,j,k)  + flux_u(i,j,k)
     FIA%flux_v_top(i,j,k)  = FIA%flux_v_top(i,j,k)  + flux_v(i,j,k)
@@ -182,7 +182,7 @@ subroutine sum_top_quantities ( Ice, IST, Atmos_boundary_fluxes, flux_u, flux_v,
   if (FIA%id_swdn > 0) then
 !$OMP parallel do default(none) shared(isc,iec,jsc,jec,ncat,G,IST,Ice,i_off,j_off, &
 !$OMP                                  flux_sw_vis_dir,flux_sw_vis_dif,            &
-!$OMP                                  flux_sw_nir_dir,flux_sw_nir_dif)            &
+!$OMP                                  flux_sw_nir_dir,flux_sw_nir_dif,FIA)        &
 !$OMP                          private(i2,j2,k2)
     do j=jsc,jec ; do k=0,ncat ; do i=isc,iec ; if (G%mask2dT(i,j)>0.5) then
       i2 = i+i_off ; j2 = j+j_off ; k2 = k+1
@@ -224,7 +224,7 @@ subroutine avg_top_quantities(IST, G, IG)
   sign = 1.0 ; if (FIA%atmos_winds) sign = -1.0
   divid = 1.0/real(FIA%avg_count)
 
-!$OMP parallel do default(none) shared(isc,iec,jsc,jec,ncat,IST,sign,divid,G) private(u,v)
+!$OMP parallel do default(none) shared(isc,iec,jsc,jec,ncat,IST,sign,divid,G,FIA) private(u,v)
   do j=jsc,jec
     do k=0,ncat ;  do i=isc,iec
       u = FIA%flux_u_top(i,j,k) * (sign*divid)
@@ -432,7 +432,7 @@ subroutine do_update_ice_model_fast( Atmos_boundary, Ice, IST, G, IG )
 !$OMP                                  flux_sw_vis_dir,flux_sw_vis_dif,flux_sw_nir_dir, &
 !$OMP                                  flux_sw_nir_dif,flux_t,flux_q,flux_lw,enth_liq_0,&
 !$OMP                                  dt_fast,flux_lh,I_enth_unit,G,S_col,kg_H_Nk,     &
-!$OMP                                  enth_units,LatHtFus,LatHtVap,IG)                 &
+!$OMP                                  enth_units,LatHtFus,LatHtVap,IG,OSS,FIA)         &
 !$OMP                          private(T_Freeze_surf,latent,enth_col,flux_sw,dhf_dt,    &
 !$OMP                                  hf_0,ts_new,dts,SW_abs_col,SW_absorbed,enth_here,&
 !$OMP                                  tot_heat_in,enth_imb,norm_enth_imb     )
