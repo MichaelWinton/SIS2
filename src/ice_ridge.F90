@@ -45,7 +45,7 @@ integer (kind=int_kind), parameter :: &
 ! e-folding scale of ridged ice, krdg_partic=1 (m^0.5)
 real(kind=dbl_kind), parameter ::  mu_rdg = 3.0
 
-public :: ice_ridging
+public :: ice_ridging, ridge_rate
 
 contains
 
@@ -223,5 +223,29 @@ subroutine ice_ridging(part_sz, mca_ice, mca_snow, mca_pond, &
   enddo; enddo ! j, i
 
 end subroutine ice_ridging
+
+!TOM>~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~!
+! ridge_rate - deformation rate or                                             !
+!              total energy dissipation rate due to ridging                    !
+!              (Flato and Hibler, 1995, JGR) or                                !
+!              net area loss in riding (CICE documentation)                    !
+!              depending on the state of the ice drift                         !
+!~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~!
+function ridge_rate(del2, div) result (rnet)
+  real, intent(in)  :: del2, div
+  real              :: del, rnet, rconv, rshear
+  !TOM> cs is now set in namelist:
+!Niki: this was commented out
+  real, parameter   :: cs=0.25 !(CICE documentation)
+
+  del=sqrt(del2)
+
+  rconv  = -min(div,0.0)           ! energy dissipated by convergence ...
+  rshear = 0.5*(del-abs(div))      ! ... and by shear
+  rnet   = rconv + cs*rshear       ! net energy contains only part of the
+                                   !  shear energy as only a fraction is
+           !  dissipated in the ridging process
+  return
+end function ridge_rate
 
 end module ice_ridging_mod
