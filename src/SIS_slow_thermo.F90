@@ -416,15 +416,15 @@ subroutine slow_thermodynamics(IST, dt_slow, CS, OSS, FIA, XSF, IOF, G, IG)
 
   !TOM> derive ridged ice fraction prior to thermodynamic changes of ice thickness
   !     in order to subtract ice melt proportionally from ridged ice volume (see below)
-  if (CS%do_ridging) then
+! if (CS%do_ridging) then
 !$OMP parallel do default(none) shared(isc,iec,jsc,jec,ncat,IST,rdg_frac) &
 !$OMP                          private(tmp3)
-    do j=jsc,jec ; do k=1,ncat ; do i=isc,iec
-      tmp3 = IST%mH_ice(i,j,k)*IST%part_size(i,j,k)
-      rdg_frac(i,j,k) = 0.0 ; if (tmp3 > 0.0) &
-          rdg_frac(i,j,k) = IST%rdg_mice(i,j,k) / tmp3
-    enddo ; enddo ; enddo
-  endif
+!   do j=jsc,jec ; do k=1,ncat ; do i=isc,iec
+!     tmp3 = IST%mH_ice(i,j,k)*IST%part_size(i,j,k)
+!     rdg_frac(i,j,k) = 0.0 ; if (tmp3 > 0.0) &
+!         rdg_frac(i,j,k) = IST%rdg_mice(i,j,k) / tmp3
+!   enddo ; enddo ; enddo
+! endif
 
   call enable_SIS_averaging(dt_slow, CS%Time, CS%diag)
 
@@ -446,17 +446,17 @@ subroutine slow_thermodynamics(IST, dt_slow, CS, OSS, FIA, XSF, IOF, G, IG)
   call SIS2_thermodynamics(IST, dt_slow, CS, OSS, FIA, IOF, G, IG)
 
   !TOM> calculate partial ice growth for ridging and aging.
-  if (CS%do_ridging) then
+! if (CS%do_ridging) then
     !     ice growth (IST%mH_ice > mi_old) does not affect ridged ice volume
     !     ice melt   (IST%mH_ice < mi_old) reduces ridged ice volume proportionally
 !$OMP parallel do default(none) shared(isc,iec,jsc,jec,ncat,IST,mi_old,rdg_frac)
-    do j=jsc,jec ; do k=1,ncat ; do i=isc,iec
-      if (IST%mH_ice(i,j,k) < mi_old(i,j,k)) &
-        IST%rdg_mice(i,j,k) = IST%rdg_mice(i,j,k) + rdg_frac(i,j,k) * &
-           (IST%mH_ice(i,j,k) - mi_old(i,j,k)) * IST%part_size(i,j,k)
-      IST%rdg_mice(i,j,k) = max(IST%rdg_mice(i,j,k), 0.0)
-    enddo ; enddo ; enddo
-  endif
+!   do j=jsc,jec ; do k=1,ncat ; do i=isc,iec
+!     if (IST%mH_ice(i,j,k) < mi_old(i,j,k)) &
+!       IST%rdg_mice(i,j,k) = IST%rdg_mice(i,j,k) + rdg_frac(i,j,k) * &
+!          (IST%mH_ice(i,j,k) - mi_old(i,j,k)) * IST%part_size(i,j,k)
+!     IST%rdg_mice(i,j,k) = max(IST%rdg_mice(i,j,k), 0.0)
+!   enddo ; enddo ; enddo
+! endif
 
   !  Other routines that do thermodynamic vertical processes should be added here
 

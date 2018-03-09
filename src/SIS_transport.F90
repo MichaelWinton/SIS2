@@ -339,9 +339,12 @@ subroutine ice_transport(part_sz, mH_ice, mH_snow, mH_pond, uc, vc, TrReg, &
     part_sz(i,j,0) = 1.0-ice_cover(i,j)
   enddo ; enddo
 
-  ! Compress the ice where the fractional coverage exceeds 1, starting with
-  ! ridging scheme.  A more complete ridging scheme would also compress
-  ! thicker ice and allow the fractional ice coverage to drop below 1.
+  if ( CS%do_ridging ) then
+    ! Ridge the ice (Icepack scheme); TO DO: pass up snow2ocn & increment ocean fprec
+    call ice_ridging(part_sz, mca_ice, mca_snow, mca_pond, mH_ice, mH_snow, mH_pond, &
+                     TrReg, G, IG, dt_slow, uc, vc, snow2ocn)
+  endif
+  ! Compress the ice, thin to thick, where the total cover > 1 (SIS scheme)
   call compress_ice(part_sz, mca_ice, mca_snow, mca_pond, &
                     mH_ice, mH_snow, mH_pond, TrReg, G, IG, CS)
 

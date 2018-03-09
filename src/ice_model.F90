@@ -2043,7 +2043,7 @@ subroutine ice_model_init(Ice, Time_Init, Time, Time_step_fast, Time_step_slow, 
     call set_ice_grid(sIG, param_file, nCat_dflt, ocean_part_min_dflt=opm_dflt)
     if (slab_ice) sIG%CatIce = 1 ! open water and ice ... but never in same place
     CatIce = sIG%CatIce ; NkIce = sIG%NkIce
-    call initialize_ice_categories(sIG, Rho_ice, param_file)
+    call initialize_ice_categories(sIG, Rho_ice, param_file, do_ridging)
 
 
     ! Set up the domains and lateral grids.
@@ -2212,7 +2212,7 @@ subroutine ice_model_init(Ice, Time_Init, Time, Time_step_fast, Time_step_slow, 
     if (slab_ice) Ice%fCS%IG%CatIce = 1 ! open water and ice ... but never in same place
     CatIce = Ice%fCS%IG%CatIce ; NkIce = Ice%fCS%IG%NkIce
 
-    call initialize_ice_categories(Ice%fCS%IG, Rho_ice, param_file)
+    call initialize_ice_categories(Ice%fCS%IG, Rho_ice, param_file, do_ridging)
 
   ! Allocate and register fields for restarts.
 
@@ -2755,18 +2755,33 @@ subroutine share_ice_domains(Ice)
 end subroutine share_ice_domains
 
 !> initialize_ice_categories sets the bounds of the ice thickness categories.
-subroutine initialize_ice_categories(IG, Rho_ice, param_file, hLim_vals)
+subroutine initialize_ice_categories(IG, Rho_ice, param_file, do_ridging, hlim_vals)
   type(ice_grid_type),          intent(inout) :: IG
   real,                         intent(in)    :: Rho_ice
   type(param_file_type),        intent(in)    :: param_file
+  logical,                      intent(in)    :: do_ridging
   real, dimension(:), optional, intent(in)    :: hLim_vals
 
   ! Initialize IG%cat_thick_lim and IG%mH_cat_bound here.
   !  ###This subroutine should be extended to add more options.
 
-  real :: hlim_dflt(8) = (/ 1.0e-10, 0.1, 0.3, 0.7, 1.1, 1.5, 2.0, 2.5 /) ! lower thickness limits 1...CatIce
+
+  ! lower thickness limits 1...CatIce
+  real :: hlim_dflt_noridge(8) = (/ 1.0e-10, 0.1, 0.3, 0.7, 1.1, 1.5, 2.0, 2.5 /)
+  ! Using formula from icepack (icepack_itd.F90):
+  !
+  ! H(n) = n * [d1 + d2*(n-1)] where d1 = 300/ncat, d2 = 50/ncat, here with ncat = 5
+  !
+  ! performance note: ridging had excessive iteration with thin SIS1 ice categories
+  real :: hlim_dflt_ridge(8) = (/ 1.0e-10, 0.6, 1.4, 2.4, 3.6, 5.0, 6.6, 8.4 /)
+  real :: hlim_dflt(8)
   integer :: k, CatIce, list_size
 
+  if (do_ridging) then
+    hlim_dflt = hlim_dflt_ridge
+  else
+    hlim_dflt = hlim_dflt_noridge
+  endif
   CatIce = IG%CatIce
   list_size = -1
   if (present(hLim_vals)) then ; if (size(hLim_vals(:)) > 1) then
