@@ -49,8 +49,8 @@ real, parameter :: Rho_ice = 905.0, Rho_snow = 330.0 ! can we eliminate these be
 
 ! future namelist parameters?
 integer (kind=int_kind), parameter :: &
-     krdg_partic = 1  , & ! 1 = new participation, 0 = Thorndike et al 75
-     krdg_redist = 1      ! 1 = new redistribution, 0 = Hibler 80
+     krdg_partic = 0  , & ! 1 = new participation, 0 = Thorndike et al 75
+     krdg_redist = 0      ! 1 = new redistribution, 0 = Hibler 80
 
 ! e-folding scale of ridged ice, krdg_partic=1 (m^0.5)
 real(kind=dbl_kind), parameter ::  mu_rdg = 3.0
