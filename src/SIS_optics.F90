@@ -32,7 +32,7 @@ type, public :: SIS_optics_CS ; private
                           ! within the sea-ice and snow.
 
   logical :: do_pond = .false. ! activate melt pond scheme - mw/new
-  real :: max_pond_frac = 0.5  ! pond water beyond this is dumped
+  real :: max_pond_frac = 0.3  ! pond water beyond this is dumped
   real :: min_pond_frac = 0.2  ! ponds below sea level don't drain
 
   logical :: slab_optics = .false. ! If true use the very old slab ice optics
@@ -151,9 +151,9 @@ end subroutine SIS_optics_init
 !~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~!
 ! ice_optics - set albedo, penetrating solar, and ice/snow transmissivity      !
 !~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~!
-subroutine ice_optics_SIS2(mp, hs, hi, ts, tfw, NkIce, albedos, abs_sfc, &
+subroutine ice_optics_SIS2(hp, hs, hi, ts, tfw, NkIce, albedos, abs_sfc, &
                     abs_snow, abs_ice_lay, abs_ocn, abs_int, CS, ITV, coszen_in)
-  real, intent(in   ) :: mp  ! pond mass (kg/m2) mw/new
+  real, intent(in   ) :: hp  ! pond thickness (m-pond)
   real, intent(in   ) :: hs  ! snow thickness (m-snow)
   real, intent(in   ) :: hi  ! ice thickness (m-ice)
   real, intent(in   ) :: ts  ! surface temperature in deg C.
@@ -245,7 +245,7 @@ subroutine ice_optics_SIS2(mp, hs, hi, ts, tfw, NkIce, albedos, abs_sfc, &
     albsno  , & ! snow albedo, for history
     albpnd      ! pond albedo, for history
 
-  real (kind=dbl_kind) :: max_mp, hs_mask_pond, pond_decr
+  real (kind=dbl_kind) :: max_hp, hs_mask_pond, pond_decr
 
   nb = size(albedos)
 
@@ -304,11 +304,16 @@ subroutine ice_optics_SIS2(mp, hs, hi, ts, tfw, NkIce, albedos, abs_sfc, &
       call get_SIS2_thermo_coefs(ITV, rho_ice=rho_ice, rho_snow=rho_snow, &
                                  rho_water=rho_water)
 
-      max_mp = (Rho_water-Rho_ice)*hi  ! max pond allowed by waterline
-      fp(1,1) = CS%max_pond_frac*sqrt(min(1.0,mp/max_mp))
-      ! set average pond depth (max. = 2*average)
-      hprad(1,1) = mp/(fp(1,1)*1000)  ! freshwater density = 1000 kg/m2
-      fs(1,1) = fs(1,1)*(1-fp(1,1))   ! reduce fs to frac of pond-free ice
+      if (hp > 0.0) then
+        max_hp = (Rho_water-Rho_ice)*hi/Rho_water  ! max pond allowed by waterline
+        fp(1,1) = CS%max_pond_frac*sqrt(min(1.0,hp/max_hp))
+        ! set average pond depth for radiation
+        hprad(1,1) = hp/fp(1,1)
+        fs(1,1) = fs(1,1)*(1-fp(1,1)) ! reduce fs to frac of pond-free ice
+      else
+        fp(1,1) = 0.0
+        hprad(1,1) = 0.0
+      endif
       ! decrement fp (increment fs) for snow masking of pond: pond is completely
       ! masked when snow depth contains 2*average_pond_depth in its pore space
       if (hs>0.0 .and. hprad(1,1)>0.0) then
@@ -317,6 +322,9 @@ subroutine ice_optics_SIS2(mp, hs, hi, ts, tfw, NkIce, albedos, abs_sfc, &
         fp(1,1) = fp(1,1) - pond_decr
         fs(1,1) = fs(1,1) + pond_decr
       endif
+if (fp(1,1)<0.0 .or. fp(1,1)>1.0 .or. hprad(1,1)<0.0 .or. hprad(1,1)>hi .or. &
+fs(1,1)<0.0 .or. fs(1,1)>1.0 .or. (fs(1,1)+fp(1,1))>1.0) &
+print *,'BAD POND OPTICS fp/fs/hprad=',fp(1,1),fs(1,1),hprad(1,1)
     else
       call shortwave_dEdd0_set_pond(nx_block, ny_block, icells, indxi, indxj, &
                aice, Tsfc, fs, fp, hprad) ! out: fp, hprad

@@ -37,7 +37,8 @@ use SIS_diag_mediator, only : query_SIS_averaging_enabled, SIS_diag_ctrl
 use SIS_diag_mediator, only : register_diag_field=>register_SIS_diag_field
 use SIS_debugging,     only : chksum, Bchksum, hchksum
 use SIS_debugging,     only : hchksum_pair, Bchksum_pair, uvchksum
-use SIS_sum_output, only : write_ice_statistics, SIS_sum_output_init, SIS_sum_out_CS
+use SIS_sum_output, only : write_ice_statistics, SIS_sum_output_init, &
+                           SIS_sum_out_CS, accumulate_ridge_overboard
 
 use mpp_domains_mod,  only  : domain2D
 use MOM_domains,       only : pass_var, pass_vector, AGRID, BGRID_NE, CGRID_NE
@@ -308,8 +309,7 @@ real, dimension(SZIB_(G),SZJB_(G)) :: &
     rdg_open, & ! formation rate of open water due to ridging
     rdg_vosh, & ! rate of ice mass shifted from level to ridged ice
 !!   rdg_s2o, &  ! snow mass [kg m-2] dumped into ocean during ridging
-    rdg_rate, & ! Niki: Where should this come from?
-    snow2ocn
+    rdg_rate    ! Niki: Where should this come from?
   real    :: tmp3  ! This is a bad name - make it more descriptive!
 
   isc = G%isc ; iec = G%iec ; jsc = G%jsc ; jec = G%jec ; ncat = IG%CatIce
@@ -343,6 +343,12 @@ real, dimension(SZIB_(G),SZJB_(G)) :: &
     ! Store values to determine the ice and snow mass change due to transport.
     h2o_chg_xprt(:,:) = 0.0
   endif
+
+  do j=jsc,jec ; do i=isc,iec
+    IOF%snow_to_ocn(i,j) = 0.0 ! initialize snow dumped by ridging to the ocean
+    IOF%enth_to_ocn(i,j) = 0.0
+    IOF%water_to_ocn(i,j) = 0.0
+  enddo; enddo
 
   do nds=1,ndyn_steps
 
@@ -621,8 +627,8 @@ real, dimension(SZIB_(G),SZJB_(G)) :: &
       call ice_transport(IST%part_size, IST%mH_ice, IST%mH_snow, IST%mH_pond, &
                          IST%u_ice_C, IST%v_ice_C, IST%TrReg, &
                          dt_slow_dyn, G, IG, CS%SIS_transport_CSp,&
-                         IST%rdg_mice, snow2ocn, rdg_rate, &
-                         rdg_open, rdg_vosh)
+                         IST%rdg_mice, IOF%snow_to_ocn, IOF%enth_to_ocn, &
+                         IOF%water_to_ocn, rdg_rate, rdg_open, rdg_vosh)
     else
       ! B-grid transport
       ! Convert the velocities to C-grid points for transport.
@@ -637,8 +643,10 @@ real, dimension(SZIB_(G),SZJB_(G)) :: &
       call ice_transport(IST%part_size, IST%mH_ice, IST%mH_snow, IST%mH_pond, &
                          uc, vc, IST%TrReg, &
                          dt_slow_dyn, G, IG, CS%SIS_transport_CSp, &
-                         IST%rdg_mice, snow2ocn, rdg_rate, rdg_open, rdg_vosh)
+                         IST%rdg_mice, IOF%snow_to_ocn, IOF%enth_to_ocn, &
+                         IOF%water_to_ocn, rdg_rate, rdg_open, rdg_vosh)
     endif
+
     if (CS%column_check) &
       call write_ice_statistics(IST, CS%Time, CS%n_calls, G, IG, CS%sum_output_CSp, &
                                 message="      Post_transport")! , check_column=.true.)
@@ -655,11 +663,7 @@ real, dimension(SZIB_(G),SZJB_(G)) :: &
   enddo ! nds=1,ndyn_steps
   call finish_ocean_top_stresses(IOF, G%HI)
 
-  ! Add snow mass dumped into ocean to flux of frozen precipitation:
-  !### WARNING - rdg_s2o is never calculated!!!
-!  if (CS%do_ridging) then ; do k=1,ncat ; do j=jsc,jec ; do i=isc,iec
-!    FIA%fprec_top(i,j,k) = FIA%fprec_top(i,j,k) + rdg_s2o(i,j)/dt_slow
-!  enddo ; enddo ; enddo ; endif
+  call accumulate_ridge_overboard(IOF, G, CS%sum_output_CSp)
 
   call mpp_clock_begin(iceClock9)
 

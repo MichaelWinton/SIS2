@@ -71,11 +71,8 @@
 ! top is brought back to sea level, or the pond is completely depleted.  This
 ! adjustment follows the CICE5 Hunke "level ice" pond scheme.
 !
-! Porous-ice sink:  No through-ice drainage occurs until the ice average
-! temperature exceeds a specified value.  The namelist parameter for this is
-! pond_porous_temp.  Once this limit is exceeded the pond drains to a minimum
-! value intended to represent coverage by ponds at sea level.  This scheme is
-! a placeholder for the mushy-layer thermodynamics to be implemented later.
+! Porous-ice sink:  this is calculated by the mushy layer thermodynamics so
+! do_pond = .true. requires do_mushy = .true. for pond drainage through ice
 !
 ! Pond fraction for radiation:  In the snow-free case we assume that pond
 ! fraction ranges between a specified minimum, where surface cavities below
@@ -94,7 +91,7 @@
 ! New diagnostics: hp, fp, pond_source, pond_sink_freeboard, pond_sink_porous,
 ! pond_sink_tot <only hp implemented so far; add pond transport diagnostics?>
 !
-! M. Winton (6/16)
+! M. Winton (7/19)
 !
 
 module SIS2_ice_thm
@@ -105,9 +102,18 @@ use MOM_error_handler, only : SIS_error=>MOM_error, FATAL, WARNING, SIS_mesg=>MO
 use MOM_file_parser,  only : get_param, log_param, read_param, log_version, param_file_type
 use MOM_obsolete_params, only : obsolete_logical
 
+! Icepack routines to implement a mushy layer ice temperature calculation
+use icepack_parameters, only: icepack_recompute_constants, icepack_init_parameters
+use icepack_mushy_physics,only: enthalpy_mush, enthalpy_snow, &
+                                temperature_mush, temperature_snow
+use icepack_therm_mushy, only: temperature_changes_salinity
+use icepack_warnings, only: icepack_warnings_flush, icepack_warnings_aborted, &
+                            icepack_warnings_setabort
+
+
 implicit none ; private
 
-public :: SIS2_ice_thm_init, SIS2_ice_thm_end, ice_temp_SIS2, estimate_tsurf
+public :: SIS2_ice_thm_init, SIS2_ice_thm_end, ice_temp_SIS2, ice_temp_mushy, estimate_tsurf
 public :: ice_resize_SIS2, add_frazil_SIS2, rebalance_ice_layers
 
 public :: get_SIS2_thermo_coefs, ice_thermo_init, ice_thermo_end
@@ -142,6 +148,7 @@ type, public :: ice_thermo_type ; private
                             ! equation-of-state type. This is here to encourage
                             ! the use of common and consistent thermodynamics
                             ! between the ice and ocean.
+  logical :: do_mushy = .false. ! activate mushy layer thermo
 end type ice_thermo_type
 
 type, public :: SIS2_ice_thm_CS ; private
@@ -169,9 +176,9 @@ type, public :: SIS2_ice_thm_CS ; private
   ! the total mass.  That is T_f/T < liq_lim implying T<T_f/liq_lim
   real :: liq_lim = .99
 
-  logical :: do_pond = .false. ! activate melt pond scheme - mw/new
+  logical :: do_mushy = .false. ! activate mushy layer thermo
+  logical :: do_pond  = .false. ! activate melt pond scheme (requires do_mushy)
   ! mw/new - these melt pond control data are temporarily placed here
-  real :: tdrain = -0.8 ! if average ice temp. > tdrain, drain pond
   real :: r_min_pond = 0.15 ! pond retention of meltwater
   real :: r_max_pond = 0.9  ! see CICE5 doc
   real :: max_pond_frac = 0.5  ! pond water beyond this is dumped
@@ -185,10 +192,11 @@ contains
 !~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~!
 !> SIS2_ice_thm_init initializes the control structure for the ice thermodynamic
 !! update code.
-subroutine SIS2_ice_thm_init(param_file, CS)
+subroutine SIS2_ice_thm_init(param_file, CS, do_pond)
 
   type(param_file_type), intent(in)    :: param_file
   type(SIS2_ice_thm_CS), pointer :: CS
+  logical, optional, intent(out) :: do_pond
 
 ! This include declares and sets the variable "version".
 #include "version_variable.h"
@@ -209,12 +217,14 @@ subroutine SIS2_ice_thm_init(param_file, CS)
                  "The minimum ice thickness at which to do temperature \n"//&
                  "calculations.", units="m", default=0.0)
 
+  call get_param(param_file, mdl, "DO_MUSHY", CS%do_mushy, &
+                 "Mushy layer thermodynamics (prognostic salinity)", &
+                 default=.false.)
   call get_param(param_file, mdl, "DO_POND", CS%do_pond, &
                  "If true, calculate melt ponds and use them for\n"//&
-                 "shortwave radiation calculation.", default=.false.)
-  call get_param(param_file, mdl, "TDRAIN", CS%tdrain, &
-                 "Melt ponds drain to sea level when ice average temp.\n"//&
-                 "exceeds TDRAIN (stand-in for mushy layer thermo)", default=-0.8)
+                 "shortwave radiation calculation.  Require DO_MUSHY=.true.", &
+                 default=.false.)
+  if (present(do_pond)) do_pond = CS%do_pond
   call get_param(param_file, mdl, "R_MIN_POND", CS%r_min_pond, &
                  "Minimum retention rate of surface water sources in melt pond\n"//&
                  "(retention scales linearly with ice cover)", default=0.15)
@@ -238,9 +248,187 @@ subroutine SIS2_ice_thm_init(param_file, CS)
 
   call obsolete_logical(param_file, "OLD_ICE_HEAT_CAPACITY", warning_val=.false.)
 
+
 end subroutine SIS2_ice_thm_init
 
+! wrapper for Icepack mushy layer ice temperature call (temperature_changes_salinity)
+subroutine ice_temp_mushy(m_pond, m_snow, m_ice, enthalpy, Sice, SF_0, dSF_dT, &
+                         sol, tfw, fb, tsurf, dtt, NkIce, tmelt, bmelt,        &
+                         h2o_ocn_to_ice, salt_ocn_to_ice, heat_ice_to_ocn, CS, ITV)
 
+  real, intent(inout) :: m_pond  !< pond mass per unit area (kg m-2)
+  real, intent(inout) :: m_snow  !< snow mass per unit area (H, usually kg m-2)
+  real, intent(inout) :: m_ice   !< ice mass per unit area (H, usually kg m-2)
+  real, dimension(0:NkIce) , &
+        intent(inout) :: enthalpy !< The enthalpy of each layer in a column of
+                                  !! snow and ice, in enth_unit (J kg-1).
+  real, dimension(NkIce), &
+        intent(inout) :: Sice  !< ice salinity by layer (g/kg)
+  real, intent(in   ) :: SF_0  !< net upward surface heat flux at ts=0 (W/m^2)
+  real, intent(in   ) :: dSF_dT !< d(sfc heat flux)/d(ts) [W/(m^2 deg-C)]
+  real, dimension(0:NkIce), &
+        intent(in)    :: sol   !< Solar heating of the snow and ice layers (W m-2)
+  real, intent(in   ) :: tfw   !< seawater freezing temperature (deg-C)
+  real, intent(in   ) :: fb    !< heat flux upward from ocean to ice bottom (W/m^2)
+  real, intent(inout) :: tsurf !< surface temperature (deg-C)
+  real, intent(in   ) :: dtt   !< timestep (sec)
+  integer, intent(in   ) :: NkIce !< The number of ice layers.
+  real, intent(inout) :: tmelt !< accumulated top melting energy  (J/m^2)
+  real, intent(inout) :: bmelt !< accumulated bottom melting energy (J/m^2)
+  real, intent(inout) :: h2o_ocn_to_ice ! accumulated water taken from ocean for
+                                        ! snow-ice formation (kg/m^2)
+  real, intent(inout) :: salt_ocn_to_ice ! accumulated salt taken from ocean for
+                                        ! snow-ice formation (g/m^2)
+  real, intent(inout) :: heat_ice_to_ocn ! accumulated heat transferred 
+                                         ! from ice to ocean (J/m2)
+  type(SIS2_ice_thm_CS), intent(in) :: CS  !< The SIS2 ice thermodynamics control structure
+  type(ice_thermo_type), intent(in) :: ITV !< The ice thermodynamic parameters
+! logical, optional, intent(in) :: check_conserve !< If true, check for local
+! heat conservation.
+!
+  logical  :: gfdl_pond
+  real (8) :: dum, fswint, hilyr, hslyr, fsurfn, fcondtop, fcondbot, &
+              fadvheat, snoice, dtmelt
+  real (8) :: apond, hpond, hpond0, pond_drain
+  real (8), dimension(NkIce) :: zTin, zTin0
+  real (8), dimension(1) :: zTsn, zTsn0
+  real, dimension(0:NkIce) :: enth_icepack ! icepack enthalpies are J/m3
+  real, dimension(1:NkIce) :: Sice0 ! initial salinity
+  integer :: k
+
+  hilyr = ( m_ice/ITV%rho_ice ) / NkIce
+  hslyr = m_snow/ITV%rho_snow
+
+  hpond = (m_pond + max(tmelt/ITV%LI,0.0))/1e3 ! reserve part of pond for later freezing
+  if (hpond .le. 0.0) then
+    hpond = 0.0
+    hpond0 = 0.0
+    apond = 0.0
+    gfdl_pond = .false.
+  else
+    hpond0 = hpond
+    apond = 1.0
+    gfdl_pond = .true.
+  endif
+
+  dum = 0.0
+  fswint = sum(sol)
+  fsurfn = 0.0
+  fcondtop = 0.0
+  fcondbot = 0.0
+
+  do k=1,NkIce
+    enth_icepack(k) = enthalpy(k)*ITV%rho_ice
+    zTin(k) = temperature_mush(enth_icepack(k), Sice(k))
+    ! start by subtracting initial salt content, add final salt later to increment ocean demand
+    salt_ocn_to_ice = salt_ocn_to_ice-Sice(k)*m_ice/NkIce
+  enddo
+  enth_icepack(0) = enthalpy(0)*ITV%rho_snow
+  zTsn(1) = temperature_snow(enth_icepack(0))
+  tsurf = zTsn(1)
+
+  Sice0 = Sice
+  zTin0 = zTin
+  zTsn0 = zTsn
+
+  call temperature_changes_salinity(dtt,                  & ! dtt
+                                    NkIce,    1,          & ! NkIce, 1
+                                    dum,     dum,         & ! not used
+                                    dum,     dum,         & ! not used
+                                    dum,     dum,         & ! not used
+                                    dum,    fswint,       & ! fswsfc not used, sum sol
+                                    sol(0:0), sol(1:NkIce), & ! sol(0), sol(1:NkIce)
+                                    hilyr,    hslyr,      & !  m_ice/rho_ice, m_snow/rho_snow
+                                    apond,    hpond,      & ! 1.0, m_pond/1000
+                                    enth_icepack(1:NkIce), zTin, &
+                                    enth_icepack(0:0),     zTsn, &
+                                    Sice,               & ! Sice
+                                    tsurf,    tfw,      & ! tsurf, tfw
+                                    tfw/ITV%dTf_dS,     & ! sss ~= tfw/dTf_dS
+                                    dum,   dum,         & ! not set
+                                    dum,  fsurfn,       & ! flwoutn not set
+                                    fcondtop, fcondbot, & ! use to calculate tmelt and bmelt
+                                    fadvheat, snoice,   & ! imply ice/ocean fluxes
+                                    .true., -SF_0, -dSF_dT, gfdl_pond )
+
+  if ( icepack_warnings_aborted() ) then
+    call icepack_warnings_flush(0);
+    call icepack_warnings_setabort(.false.)
+    call SIS_error(WARNING,'icepack temperature_changes_salinity (1) error');
+    print *,'input Temp=',zTsn0,zTin0
+    print *,'input Sice=',Sice0
+    print *,'input m_ice/m_snow/m_pond=',m_ice,m_snow,m_pond
+  endif
+
+  dtmelt = dtt*(fsurfn-fcondtop)
+  if ((tmelt+dtmelt+ITV%LI*m_pond) .le. 0.0) then ! can't freeze > whole pond:
+    ! add the residual energy from freezing remaining pond to surface energy
+    ! balance and recalculate ice T/S without pond;  note that the pond mass
+    ! remains but is reserved to be frozen later in ice_resize (consuming bmelt<0)
+    dtmelt = -(tmelt+ITV%LI*m_pond)
+    tmelt = -ITV%LI*m_pond
+    hpond = 0.0; apond = 0.0;
+    fswint = sum(sol)
+    fsurfn = 0.0
+    fcondtop = 0.0
+    fcondbot = 0.0
+
+    hilyr = ( m_ice/ITV%rho_ice ) / NkIce
+    hslyr = m_snow/ITV%rho_snow
+    do k=1,NkIce
+      Sice(k) = Sice0(k)
+      enth_icepack(k) = enthalpy(k)*ITV%rho_ice
+      zTin(k) = temperature_mush(enth_icepack(k), Sice(k))
+    enddo
+    enth_icepack(0) = enthalpy(0)*ITV%rho_snow
+    zTsn(1) = temperature_snow(enth_icepack(0))
+    tsurf = zTsn(1)
+    call temperature_changes_salinity(dtt,                & ! dtt
+                                    NkIce,    1,          & ! NkIce, 1
+                                    dum,     dum,         & ! not used
+                                    dum,     dum,         & ! not used
+                                    dum,     dum,         & ! not used
+                                    dum,    fswint,       & ! fswsfc not used, sum sol
+                                    sol(0:0), sol(1:NkIce), & ! sol(0), sol(1:NkIce)
+                                    hilyr,    hslyr,      & !  m_ice/rho_ice, m_snow/rho_snow
+                                    apond,    hpond,      & ! 1.0, m_pond/1000
+                                    enth_icepack(1:NkIce), zTin, &
+                                    enth_icepack(0:0),     zTsn, &
+                                    Sice,               & ! Sice
+                                    tsurf,    tfw,      & ! tsurf, tfw
+                                    tfw/ITV%dTf_dS,     & ! sss ~= tfw/dTf_dS
+                                    dum,   dum,         & ! not set
+                                    dum,  fsurfn,       & ! flwoutn not set
+                                    fcondtop, fcondbot, & ! use to calculate tmelt and bmelt
+                                    fadvheat, snoice,   & ! imply ice/ocean fluxes
+                                    .true., -SF_0-dtmelt/dtt, -dSF_dT, .false. )
+
+    if ( icepack_warnings_aborted() ) then
+      call icepack_warnings_flush(0);
+      call icepack_warnings_setabort(.false.)
+      call SIS_error(WARNING,'icepack temperature_changes_salinity (2) error');
+    endif
+  else
+    tmelt = tmelt + dtt*(fsurfn-fcondtop)
+    pond_drain = (hpond0-hpond)*1e3; m_pond = max(m_pond-pond_drain,0.0)
+  endif
+  bmelt = bmelt + dtt*(fb    +fcondbot)
+
+  enthalpy(0) = enth_icepack(0) / ITV%rho_snow
+  enthalpy(1:NkIce) = enth_icepack(1:NkIce) / ITV%rho_ice
+
+  m_ice = NkIce*hilyr*ITV%rho_ice
+  m_snow =      hslyr*ITV%rho_snow
+
+  ! the mushy "snow to ice" code converts a thickness of snow (snoice) to the
+  ! same thickness of ice; the density difference is made up by liquid water
+  ! taken from the ocean; pond drainage is subtracted from ocean->ice flux
+  h2o_ocn_to_ice = h2o_ocn_to_ice + snoice*(ITV%rho_ice-ITV%rho_snow) &
+                                  - pond_drain;
+  heat_ice_to_ocn = heat_ice_to_ocn + dtt*fadvheat
+  salt_ocn_to_ice = salt_ocn_to_ice + sum(Sice)*m_ice/NkIce
+
+end subroutine ice_temp_mushy
 
 !~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~!
 !> ice_temp_SIS2 calculates the updated snow and ice enthalpy and new skin
@@ -1284,7 +1472,7 @@ subroutine ice_resize_SIS2(a_ice, m_pond, m_lay, Enthalpy, Sice_therm, Salin, &
   integer, intent(in) :: npassive         ! Number of passive tracers
   real, dimension(0:NkIce+1,npassive), &
         intent(inout) :: TrLay       ! Passive tracer slice
-  real, intent(  out) :: heat_to_ocn ! energy left after ice all melted (J/m^2)
+  real, intent(inout) :: heat_to_ocn ! add in energy left after ice all melted (J/m^2)
   real, intent(  out) :: h2o_ice_to_ocn ! liquid water flux to ocean (kg/m^2)
   real, intent(  out) :: h2o_ocn_to_ice ! liquid water flux from ocean (kg/m^2)
   real, intent(  out) :: evap_from_ocn! evaporation flux from ocean (kg/m^2)
@@ -1331,7 +1519,7 @@ subroutine ice_resize_SIS2(a_ice, m_pond, m_lay, Enthalpy, Sice_therm, Salin, &
                              Latent_vapor=Lat_vapor, Rho_water=rho_water, rho_ice=rho_ice)
   min_dEnth_freeze = (LI*enth_unit) * (1.0-CS%liq_lim)
 
-  ! mw/new - meltwater retention in pond
+  ! mw/new - meltwater and rain retention in pond
   pond_rate = CS%r_min_pond+(CS%r_max_pond-CS%r_min_pond)*a_ice
 
   top_melt = tmlt*enth_unit ; bot_melt = bmlt*enth_unit
@@ -1346,8 +1534,6 @@ subroutine ice_resize_SIS2(a_ice, m_pond, m_lay, Enthalpy, Sice_therm, Salin, &
     enth_fr(k) = enthalpy_liquid_freeze(sice_therm(k), ITV)
   enddo
 
-  heat_to_ocn = 0.0   ! for excess melt energy
-
   evap_from_ocn = 0.0 ! for excess evap-melt
   h2o_ocn_to_ice = 0.0 ; h2o_ice_to_ocn = 0.0 ; snow_to_ice  = 0.0
   h2o_to_pond = 0.0
@@ -1355,11 +1541,10 @@ subroutine ice_resize_SIS2(a_ice, m_pond, m_lay, Enthalpy, Sice_therm, Salin, &
   salt_to_ice = 0.0
   enthM_freezing = 0.0 ; enthM_melt = 0.0 ; enthM_evap = 0.0 ; enthM_snowfall = 0.0
 
-  ! raining on cold ice led to unphysical temperature oscillations
-  ! in single column test; need to pass all rain through to ocean for now - mw
-  ! m_pond = m_pond + pond_rate*rain ! mw/new pond intercepts rain
-  ! h2o_ice_to_ocn = h2o_ice_to_ocn + (1-pond_rate)*rain
-  ! h2o_ice_to_ocn = h2o_ice_to_ocn + rain
+  if (CS%do_pond) then ! pond intercepts rain just like melt
+    m_pond = m_pond + pond_rate*rain
+    h2o_ice_to_ocn = h2o_ice_to_ocn + (1-pond_rate)*rain
+  endif
 
   ! Delete this later, since it should not happen.
   mtot_ice = 0.0 ; do k=1,NkIce ; mtot_ice = mtot_ice + m_lay(k) ; enddo
@@ -1373,8 +1558,8 @@ subroutine ice_resize_SIS2(a_ice, m_pond, m_lay, Enthalpy, Sice_therm, Salin, &
   endif
 
   if (top_melt < 0.0 .and. CS%do_pond) then ! mw/new: add fresh/0C ice to top layer
-    ! enth_freeze = -LI   ! this is right for prognostic salinity (i think)
-    enth_freeze = Enthalpy(1) ! this is right for fixed salinity
+    enth_freeze = -LI   ! this is right for prognostic salinity (i think)
+    ! enth_freeze = Enthalpy(1) ! this is right for fixed salinity
     m_freeze = top_melt/enth_freeze;
     if (m_freeze > m_pond) then
       Enthalpy(1) = (m_lay(1)*Enthalpy(1) + m_freeze*enth_freeze) / &
@@ -1512,22 +1697,8 @@ subroutine ice_resize_SIS2(a_ice, m_pond, m_lay, Enthalpy, Sice_therm, Salin, &
   Enthalpy_melt = enthM_melt
   Enthalpy_freeze = enthM_freezing
 
-  ! calculate total ice for pond drainage and waterline adjustments below
+  ! calculate total ice for waterline adjustments below
   mtot_ice = 0.0 ; do k=1,NkIce ; mtot_ice = mtot_ice + m_lay(k) ; enddo
-
-  if ( m_pond > 0.0 ) then ! consider pond drainage through ice
-    tavg = 0.0
-    do k=1,NkIce ! calculate liquid fraction as in Hunke et al 2013
-      tavg = tavg+Temp_from_En_S(Enthalpy(k), Sice_therm(k), ITV)*m_lay(k)
-    end do
-    tavg = tavg/mtot_ice  ! average ice temperature
-    if (tavg > CS%tdrain) then ! drain pond based on tunable ice temp. criterion
-      mp_max = mtot_ice*(Rho_water/Rho_ice-1)
-      mp_min = mp_max*(CS%min_pond_frac/CS%max_pond_frac)**2
-      h2o_ice_to_ocn = h2o_ice_to_ocn + max(m_pond-mp_min,0.0)
-      m_pond = m_pond-max(m_pond-mp_min,0.0)
-    endif
-  endif
 
   ! calculate mass to take from pond to bring ice top to waterline - mw/new
   h2o_from_pond = m_pond+m_lay(0)-(Rho_water/Rho_ice-1.0)*mtot_ice
@@ -1856,10 +2027,21 @@ subroutine ice_thermo_init(param_file, ITV, init_EOS )
     call get_param(param_file, mdl, "USE_SLAB_ICE", ITV%slab_ice, &
                  "If true, use the very old slab-style ice.", default=.false.)
   endif
+  call get_param(param_file, mdl, "DO_MUSHY", ITV%do_mushy, &
+                 "Mushy layer thermodynamics (prognostic salinity)", &
+                 default=.false.)
 
   if (present(init_EOS)) then ; if (init_EOS) then
     if (.not.associated(ITV%EOS)) call EOS_init(param_file, ITV%EOS)
   endif ; endif
+
+  ! sync icepack parameters to SIS2 values
+  call icepack_init_parameters(rhos_in=ITV%Rho_snow, rhoi_in=ITV%Rho_ice, & 
+                               rhow_in=ITV%Rho_water, &
+                               cp_ice_in=ITV%Cp_ice, cp_ocn_in=ITV%Cp_brine, &
+                               Lsub_in=ITV%Lat_Vapor+ITV%LI, &
+                               Lvap_in=ITV%Lat_Vapor);
+  call icepack_recompute_constants
 
 end subroutine ice_thermo_init
 
@@ -2296,13 +2478,15 @@ subroutine get_SIS2_thermo_coefs(ITV, ice_salinity, enthalpy_units, &
   logical, optional, intent(out) :: &
     slab_ice        !< If true, use the very old slab ice thermodynamics,
                     !! with effectively zero heat capacity of ice and snow.
+
   call get_thermo_coefs(ice_salinity=ice_salinity)
 
   if (present(Cp_Ice)) Cp_Ice = ITV%Cp_Ice
   if (present(Cp_Water)) Cp_Water = ITV%Cp_Water
   if (present(Cp_Brine)) Cp_Brine = ITV%Cp_Brine
   if (present(enthalpy_units)) enthalpy_units = ITV%enth_unit
-  if (present(specified_thermo_salinity)) specified_thermo_salinity = .true.
+  if (present(specified_thermo_salinity)) &
+    specified_thermo_salinity = .not. ITV%do_mushy
   if (present(rho_ice)) rho_ice = ITV%rho_ice
   if (present(rho_snow)) rho_snow = ITV%rho_snow
   if (present(rho_water)) rho_water = ITV%rho_water

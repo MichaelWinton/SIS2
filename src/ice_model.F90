@@ -667,7 +667,7 @@ subroutine set_ocean_top_dyn_fluxes(Ice, IST, IOF, FIA, G, IG, sCS)
   type(ice_grid_type),        intent(in)    :: IG
   type(SIS_slow_CS),          intent(in)    :: sCS
 
-  real :: I_count
+  real :: I_count, dt_slow, LI
   integer :: i, j, k, isc, iec, jsc, jec
   integer :: i2, j2, i_off, j_off, ind, ncat, NkIce
   isc = G%isc ; iec = G%iec ; jsc = G%jsc ; jec = G%jec
@@ -678,6 +678,10 @@ subroutine set_ocean_top_dyn_fluxes(Ice, IST, IOF, FIA, G, IG, sCS)
     call IOF_chksum("Start set_ocean_top_dyn_fluxes", IOF, G)
     call IST_chksum("Start set_ocean_top_dyn_fluxes", IST, G, IG)
   endif
+
+  dt_slow = time_type_to_real(Ice%sCS%Time_step_slow)
+
+  call get_SIS2_thermo_coefs(IST%ITV, Latent_fusion=LI)
 
   ! Sum the concentration weighted mass.
   Ice%mi(:,:) = 0.0
@@ -713,6 +717,13 @@ subroutine set_ocean_top_dyn_fluxes(Ice, IST, IOF, FIA, G, IG, sCS)
       Ice%p_surf(i2,j2) = 0.0
     endif
     Ice%p_surf(i2,j2) = Ice%p_surf(i2,j2) + G%G_Earth*Ice%mi(i2,j2)
+
+    ! add in fluxes from snow and pond dumped by ridging
+    Ice%fprec(i2,j2)  = Ice%fprec(i2,j2)  + IOF%snow_to_ocn(i,j)/dt_slow
+    Ice%lprec(i2,j2)  = Ice%lprec(i2,j2)  + IOF%water_to_ocn(i,j)/dt_slow
+    Ice%flux_t(i2,j2) = Ice%flux_t(i2,j2) - (IOF%enth_to_ocn(i,j) &
+                                            +LI*IOF%snow_to_ocn(i,j))/dt_slow
+                                            ! just sensible heat -> flux_t
   enddo ; enddo
 
 ! This extra block is required with the Verona and earlier versions of the coupler.
@@ -1034,6 +1045,7 @@ subroutine set_ice_surface_state(Ice, IST, OSS, Rad, FIA, G, IG, fCS)
   integer :: index
   real :: H_to_m_ice     ! The specific volumes of ice and snow times the
   real :: H_to_m_snow    ! conversion factor from thickness units, in m H-1.
+  real :: H_to_m_water   ! conversion factor from thickness units, in m H-1.
   real, parameter :: T_0degC = 273.15 ! 0 degrees C in Kelvin
 
   isc = G%isc ; iec = G%iec ; jsc = G%jsc ; jec = G%jec ; ncat = IG%CatIce
@@ -1041,6 +1053,7 @@ subroutine set_ice_surface_state(Ice, IST, OSS, Rad, FIA, G, IG, fCS)
 
   call get_SIS2_thermo_coefs(IST%ITV, rho_ice=rho_ice, rho_snow=rho_snow)
   H_to_m_snow = IG%H_to_kg_m2 / Rho_snow ; H_to_m_ice = IG%H_to_kg_m2 / Rho_ice
+  H_to_m_water = IG%H_to_kg_m2 / 1e3;
 
 
   if (fCS%bounds_check) &
@@ -1054,7 +1067,10 @@ subroutine set_ice_surface_state(Ice, IST, OSS, Rad, FIA, G, IG, fCS)
   m_ice_tot(:,:) = 0.0
 !$OMP parallel do default(none) shared(isc,iec,jsc,jec,G,IST,OSS,FIA,ncat,m_ice_tot)
   do j=jsc,jec ; do k=1,ncat ; do i=isc,iec
-    FIA%tmelt(i,j,k) = 0.0 ; FIA%bmelt(i,j,k) = 0.0
+    FIA%tmelt(i,j,k) = 0.0 ; FIA%bmelt(i,j,k) = 0.0;
+    FIA%h2o_ocn_to_ice(i,j,k) = 0.0
+    FIA%salt_ocn_to_ice(i,j,k) = 0.0
+    FIA%heat_ice_to_ocn(i,j,k) = 0.0
     m_ice_tot(i,j) = m_ice_tot(i,j) + IST%mH_ice(i,j,k) * IST%part_size(i,j,k)
   enddo ; enddo ; enddo
 
@@ -1086,7 +1102,7 @@ subroutine set_ice_surface_state(Ice, IST, OSS, Rad, FIA, G, IG, fCS)
   !$OMP parallel do default(shared) private(i2,j2,k2,sw_abs_lay,albedos)
   do j=jsc,jec ; do k=1,ncat ; do i=isc,iec ; if (IST%part_size(i,j,k) > 0.0) then
     i2 = i+i_off ; j2 = j+j_off ; k2 = k+1
-    call ice_optics_SIS2(IST%mH_pond(i,j,k), IST%mH_snow(i,j,k)*H_to_m_snow, &
+    call ice_optics_SIS2(IST%mH_pond(i,j,k)*H_to_m_water, IST%mH_snow(i,j,k)*H_to_m_snow, &
              IST%mH_ice(i,j,k)*H_to_m_ice, &
              Rad%t_skin(i,j,k), OSS%T_fr_ocn(i,j), IG%NkIce, albedos, &
              Rad%sw_abs_sfc(i,j,k),  Rad%sw_abs_snow(i,j,k), &
@@ -1216,18 +1232,20 @@ subroutine set_ice_optics(IST, OSS, Tskin_ice, coszen, Rad, G, IG, optics_CSp)
   real :: rho_snow ! The nominal density of snow in kg m-3.
   real :: albedos(4)  ! The albedos for the various wavelenth and direction bands
                       ! for the current partition, non-dimensional and 0 to 1.
-  real :: H_to_m_ice  ! The specific volumes of ice and snow times the
-  real :: H_to_m_snow ! conversion factor from thickness units, in m H-1.
+  real :: H_to_m_ice   ! The specific volumes of ice and snow times the
+  real :: H_to_m_snow  ! conversion factor from thickness units, in m H-1.
+  real :: H_to_m_water ! conversion factor from thickness units, in m H-1.
   integer :: i, j, k, m, isc, iec, jsc, jec, ncat
 
   isc = G%isc ; iec = G%iec ; jsc = G%jsc ; jec = G%jec ; ncat = IG%CatIce
 
   call get_SIS2_thermo_coefs(IST%ITV, rho_ice=rho_ice, rho_snow=rho_snow)
   H_to_m_snow = IG%H_to_kg_m2 / Rho_snow ; H_to_m_ice = IG%H_to_kg_m2 / Rho_ice
+  H_to_m_water = IG%H_to_kg_m2 / 1e3;
 
   !$OMP parallel do default(shared) private(albedos, sw_abs_lay)
   do j=jsc,jec ; do k=1,ncat ; do i=isc,iec ; if (IST%part_size(i,j,k) > 0.0) then
-    call ice_optics_SIS2(IST%mH_pond(i,j,k), IST%mH_snow(i,j,k)*H_to_m_snow, &
+    call ice_optics_SIS2(IST%mH_pond(i,j,k)*H_to_m_water, IST%mH_snow(i,j,k)*H_to_m_snow, &
              IST%mH_ice(i,j,k)*H_to_m_ice, Tskin_ice(i,j,k), OSS%T_fr_ocn(i,j), IG%NkIce, &
              albedos, Rad%sw_abs_sfc(i,j,k),  Rad%sw_abs_snow(i,j,k), &
              sw_abs_lay, Rad%sw_abs_ocn(i,j,k), Rad%sw_abs_int(i,j,k), &
@@ -2043,7 +2061,7 @@ subroutine ice_model_init(Ice, Time_Init, Time, Time_step_fast, Time_step_slow, 
     call set_ice_grid(sIG, param_file, nCat_dflt, ocean_part_min_dflt=opm_dflt)
     if (slab_ice) sIG%CatIce = 1 ! open water and ice ... but never in same place
     CatIce = sIG%CatIce ; NkIce = sIG%NkIce
-    call initialize_ice_categories(sIG, Rho_ice, param_file)
+    call initialize_ice_categories(sIG, Rho_ice, param_file, do_ridging)
 
 
     ! Set up the domains and lateral grids.
@@ -2212,7 +2230,7 @@ subroutine ice_model_init(Ice, Time_Init, Time, Time_step_fast, Time_step_slow, 
     if (slab_ice) Ice%fCS%IG%CatIce = 1 ! open water and ice ... but never in same place
     CatIce = Ice%fCS%IG%CatIce ; NkIce = Ice%fCS%IG%NkIce
 
-    call initialize_ice_categories(Ice%fCS%IG, Rho_ice, param_file)
+    call initialize_ice_categories(Ice%fCS%IG, Rho_ice, param_file, do_ridging)
 
   ! Allocate and register fields for restarts.
 
@@ -2755,18 +2773,33 @@ subroutine share_ice_domains(Ice)
 end subroutine share_ice_domains
 
 !> initialize_ice_categories sets the bounds of the ice thickness categories.
-subroutine initialize_ice_categories(IG, Rho_ice, param_file, hLim_vals)
+subroutine initialize_ice_categories(IG, Rho_ice, param_file, do_ridging, hlim_vals)
   type(ice_grid_type),          intent(inout) :: IG
   real,                         intent(in)    :: Rho_ice
   type(param_file_type),        intent(in)    :: param_file
+  logical,                      intent(in)    :: do_ridging
   real, dimension(:), optional, intent(in)    :: hLim_vals
 
   ! Initialize IG%cat_thick_lim and IG%mH_cat_bound here.
   !  ###This subroutine should be extended to add more options.
 
-  real :: hlim_dflt(8) = (/ 1.0e-10, 0.1, 0.3, 0.7, 1.1, 1.5, 2.0, 2.5 /) ! lower thickness limits 1...CatIce
+
+  ! lower thickness limits 1...CatIce
+  real :: hlim_dflt_noridge(8) = (/ 1.0e-10, 0.1, 0.3, 0.7, 1.1, 1.5, 2.0, 2.5 /)
+  ! Using formula from icepack (icepack_itd.F90):
+  !
+  ! H(n) = n * [d1 + d2*(n-1)] where d1 = 300/ncat, d2 = 50/ncat, here with ncat = 5
+  !
+  ! performance note: ridging had excessive iteration with thin SIS1 ice categories
+  real :: hlim_dflt_ridge(8) = (/ 1.0e-10, 0.6, 1.4, 2.4, 3.6, 5.0, 6.6, 8.4 /)
+  real :: hlim_dflt(8)
   integer :: k, CatIce, list_size
 
+  if (do_ridging) then
+    hlim_dflt = hlim_dflt_ridge
+  else
+    hlim_dflt = hlim_dflt_noridge
+  endif
   CatIce = IG%CatIce
   list_size = -1
   if (present(hLim_vals)) then ; if (size(hLim_vals(:)) > 1) then

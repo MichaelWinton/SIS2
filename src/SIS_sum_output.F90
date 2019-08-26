@@ -56,7 +56,7 @@ implicit none ; private
 #include <SIS2_memory.h>
 
 public write_ice_statistics, accumulate_bottom_input
-public SIS_sum_output_init, SIS_sum_output_end, SIS_sum_out_CS
+public SIS_sum_output_init, SIS_sum_output_end, SIS_sum_out_CS, accumulate_ridge_overboard
 public accumulate_input_1, accumulate_input_2
 
 !-----------------------------------------------------------------------
@@ -438,7 +438,7 @@ subroutine write_ice_statistics(IST, day, n, G, IG, CS, message, check_column, t
       ice_area(i,j,hem) = ice_area(i,j,hem) + area_pt
       col_mass(i,j,hem) = col_mass(i,j,hem) + area_pt * IG%H_to_kg_m2 * &
                           (IST%mH_ice(i,j,k) + (IST%mH_snow(i,j,k) + &
-                           IST%mH_pond(i,j,k))) ! mw/new - assumed pond heat/salt = 0
+                           IST%mH_pond(i,j,k)))
 
       col_heat(i,j,hem) = col_heat(i,j,hem) + area_pt * IG%H_to_kg_m2 * &
                           (IST%mH_snow(i,j,k) * IST%enth_snow(i,j,k,1) + &
@@ -762,6 +762,28 @@ subroutine accumulate_bottom_input(IST, OSS, FIA, IOF, dt, G, IG, CS)
   enddo ; enddo
 
 end subroutine accumulate_bottom_input
+
+subroutine accumulate_ridge_overboard(IOF, G, CS)
+!   This subroutine adds the snow (and related) heat dumped into the
+!   ocean by ridging back into the column for conservation checks
+! Arguments: IOF - Ice/ocean fluxes
+!  (in)      G - The sea ice model's grid structure.
+!  (in)      CS - The control structure returned by a previous call to
+!                 SIS_sum_output_init.
+  type(ice_ocean_flux_type),  intent(in) :: IOF
+  type(SIS_hor_grid_type),    intent(in) :: G
+  type(SIS_sum_out_CS),       pointer    :: CS
+
+  integer :: i, j, isc, iec, jsc, jec;
+
+  isc = G%isc ; iec = G%iec ; jsc = G%jsc ; jec = G%jec ;
+
+  do j=jsc,jec ; do i=isc,iec
+    CS%water_in_col(i,j) = CS%water_in_col(i,j) - IOF%snow_to_ocn(i,j) &
+                                                - IOF%water_to_ocn(i,j)
+    CS%heat_in_col(i,j) = CS%heat_in_col(i,j) - IOF%enth_to_ocn(i,j)
+  enddo ; enddo
+end subroutine accumulate_ridge_overboard
 
 subroutine accumulate_input_1(IST, FIA, OSS, dt, G, IG, CS)
 !   This subroutine accumulates the net input of fresh water and heat through

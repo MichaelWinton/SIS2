@@ -16,7 +16,7 @@ use coupler_types_mod, only : coupler_type_register_restarts
 use SIS_hor_grid, only : SIS_hor_grid_type
 use ice_grid, only : ice_grid_type
 
-use SIS2_ice_thm, only : ice_thermo_type, SIS2_ice_thm_CS, enth_from_TS, energy_melt_EnthS
+use SIS2_ice_thm, only : ice_thermo_type, enth_from_TS, energy_melt_EnthS
 use SIS2_ice_thm, only : get_SIS2_thermo_coefs, temp_from_En_S
 
 use MOM_coms, only : PE_here, max_across_PEs
@@ -199,6 +199,9 @@ type fast_ice_avg_type
                     ! at the top of the ice, in kg m-2 s-1.
     tmelt       , & ! Ice-top melt energy into the ice/snow in J m-2.
     bmelt       , & ! Ice-bottom melting energy into the ice in J m-2.
+    h2o_ocn_to_ice,&  ! for snow-to-ice and pond flush ice/ocean fluxes (kg m-2)
+    salt_ocn_to_ice,& ! as above for salt (kg m-2)
+    heat_ice_to_ocn,& ! as above for heat (J m-2)
     Tskin_cat   , & ! The ice skin temperature by category, in degC.
     sw_abs_ocn      !  The fraction of the absorbed shortwave radiation that is
                     !  absorbed in the ocean, nondim and <=1.
@@ -404,7 +407,8 @@ type ice_ocean_flux_type
     melt_nudge, &       ! A downward fresh water flux into the ocean that
                         ! acts to nudge the ocean surface salinity to
                         ! facilitate the retention of sea ice, in kg m-2 s-1.
-    flux_salt           ! The flux of salt out of the ocean in kg m-2.
+    flux_salt, &        ! The flux of salt out of the ocean in kg m-2.
+    snow_to_ocn, enth_to_ocn, water_to_ocn ! ridging dumps snow and pond to ocean
   real, allocatable, dimension(:,:,:) :: &
     flux_sw_ocn      ! The downward flux of shortwave radiation at ocean
                      ! surface in W m-2.  The third dimension combines
@@ -761,6 +765,9 @@ subroutine alloc_fast_ice_avg(FIA, HI, IG, interp_fluxes, gas_fluxes)
   allocate(FIA%frazil_left(isd:ied, jsd:jed)) ; FIA%frazil_left(:,:) = 0.0
   allocate(FIA%tmelt(isd:ied, jsd:jed, CatIce)) ; FIA%tmelt(:,:,:) = 0.0
   allocate(FIA%bmelt(isd:ied, jsd:jed, CatIce)) ; FIA%bmelt(:,:,:) = 0.0
+  allocate(FIA%h2o_ocn_to_ice(isd:ied, jsd:jed, CatIce)) ; FIA%h2o_ocn_to_ice(:,:,:) = 0.0
+  allocate(FIA%salt_ocn_to_ice(isd:ied, jsd:jed, CatIce)) ; FIA%salt_ocn_to_ice(:,:,:) = 0.0
+  allocate(FIA%heat_ice_to_ocn(isd:ied, jsd:jed, CatIce)) ; FIA%heat_ice_to_ocn(:,:,:) = 0.0
   allocate(FIA%WindStr_x(isd:ied, jsd:jed)) ; FIA%WindStr_x(:,:) = 0.0
   allocate(FIA%WindStr_y(isd:ied, jsd:jed)) ; FIA%WindStr_y(:,:) = 0.0
   allocate(FIA%WindStr_ocn_x(isd:ied, jsd:jed)) ; FIA%WindStr_ocn_x(:,:) = 0.0
@@ -901,6 +908,9 @@ subroutine alloc_ice_ocean_flux(IOF, HI, do_iceberg_fields)
   if (.not.associated(IOF)) allocate(IOF)
 
   allocate(IOF%flux_salt(SZI_(HI), SZJ_(HI))) ; IOF%flux_salt(:,:) = 0.0
+  allocate(IOF%snow_to_ocn(SZI_(HI), SZJ_(HI))) ; IOF%snow_to_ocn(:,:) = 0.0
+  allocate(IOF%enth_to_ocn(SZI_(HI), SZJ_(HI))) ; IOF%enth_to_ocn(:,:) = 0.0
+  allocate(IOF%water_to_ocn(SZI_(HI), SZJ_(HI))) ; IOF%water_to_ocn(:,:) = 0.0
 
   allocate(IOF%flux_sh_ocn_top(SZI_(HI), SZJ_(HI))) ;  IOF%flux_sh_ocn_top(:,:) = 0.0
   allocate(IOF%evap_ocn_top(SZI_(HI), SZJ_(HI))) ;  IOF%evap_ocn_top(:,:) = 0.0
@@ -1366,6 +1376,9 @@ subroutine copy_FIA_to_FIA(FIA_in, FIA_out, HI_in, HI_out, IG)
     i2 = i+i_off ; j2 = j+j_off
     FIA_out%tmelt(i2,j2,k) = FIA_in%tmelt(i,j,k)
     FIA_out%bmelt(i2,j2,k) = FIA_in%bmelt(i,j,k)
+    FIA_out%h2o_ocn_to_ice(i2,j2,k) = FIA_in%h2o_ocn_to_ice(i,j,k)
+    FIA_out%salt_ocn_to_ice(i2,j2,k) = FIA_in%salt_ocn_to_ice(i,j,k)
+    FIA_out%heat_ice_to_ocn(i2,j2,k) = FIA_in%heat_ice_to_ocn(i,j,k)
     FIA_out%sw_abs_ocn(i2,j2,k) = FIA_in%sw_abs_ocn(i,j,k)
   enddo ; enddo ; enddo
 
@@ -1474,6 +1487,12 @@ subroutine redistribute_FIA_to_FIA(FIA_in, FIA_out, domain_in, domain_out, G_out
                           FIA_out%tmelt, complete=.false.)
     call mpp_redistribute(domain_in, FIA_in%bmelt, domain_out, &
                           FIA_out%bmelt, complete=.false.)
+    call mpp_redistribute(domain_in, FIA_in%h2o_ocn_to_ice, domain_out, &
+                          FIA_out%h2o_ocn_to_ice, complete=.false.)
+    call mpp_redistribute(domain_in, FIA_in%salt_ocn_to_ice, domain_out, &
+                          FIA_out%salt_ocn_to_ice, complete=.false.)
+    call mpp_redistribute(domain_in, FIA_in%heat_ice_to_ocn, domain_out, &
+                          FIA_out%heat_ice_to_ocn, complete=.false.)
     call mpp_redistribute(domain_in, FIA_in%sw_abs_ocn, domain_out, &
                           FIA_out%sw_abs_ocn, complete=.true.)
 
@@ -1549,6 +1568,12 @@ subroutine redistribute_FIA_to_FIA(FIA_in, FIA_out, domain_in, domain_out, G_out
     call mpp_redistribute(domain_in, null_ptr3D, domain_out, &
                           FIA_out%bmelt, complete=.false.)
     call mpp_redistribute(domain_in, null_ptr3D, domain_out, &
+                          FIA_out%h2o_ocn_to_ice, complete=.false.)
+    call mpp_redistribute(domain_in, null_ptr3D, domain_out, &
+                          FIA_out%salt_ocn_to_ice, complete=.false.)
+    call mpp_redistribute(domain_in, null_ptr3D, domain_out, &
+                          FIA_out%heat_ice_to_ocn, complete=.false.)
+    call mpp_redistribute(domain_in, null_ptr3D, domain_out, &
                           FIA_out%sw_abs_ocn, complete=.true.)
 
     call mpp_redistribute(domain_in, null_ptr2D, domain_out, &
@@ -1622,6 +1647,12 @@ subroutine redistribute_FIA_to_FIA(FIA_in, FIA_out, domain_in, domain_out, G_out
     call mpp_redistribute(domain_in, FIA_in%tmelt, domain_out, &
                           null_ptr3D, complete=.false.)
     call mpp_redistribute(domain_in, FIA_in%bmelt, domain_out, &
+                          null_ptr3D, complete=.false.)
+    call mpp_redistribute(domain_in, FIA_in%h2o_ocn_to_ice, domain_out, &
+                          null_ptr3D, complete=.false.)
+    call mpp_redistribute(domain_in, FIA_in%salt_ocn_to_ice, domain_out, &
+                          null_ptr3D, complete=.false.)
+    call mpp_redistribute(domain_in, FIA_in%heat_ice_to_ocn, domain_out, &
                           null_ptr3D, complete=.false.)
     call mpp_redistribute(domain_in, FIA_in%sw_abs_ocn, domain_out, &
                           null_ptr3D, complete=.true.)
@@ -2074,7 +2105,8 @@ subroutine dealloc_fast_ice_avg(FIA)
   deallocate(FIA%runoff, FIA%calving, FIA%runoff_hflx, FIA%calving_hflx)
   deallocate(FIA%calving_preberg, FIA%calving_hflx_preberg)
 
-  deallocate(FIA%tmelt, FIA%bmelt, FIA%frazil_left)
+  deallocate(FIA%tmelt, FIA%bmelt, FIA%h2o_ocn_to_ice, FIA%salt_ocn_to_ice)
+  deallocate(FIA%heat_ice_to_ocn, FIA%frazil_left)
   deallocate(FIA%WindStr_x, FIA%WindStr_y, FIA%p_atm_surf)
   deallocate(FIA%WindStr_ocn_x, FIA%WindStr_ocn_y)
   deallocate(FIA%ice_free, FIA%ice_cover, FIA%sw_abs_ocn, FIA%Tskin_avg)
@@ -2139,6 +2171,7 @@ subroutine dealloc_ice_ocean_flux(IOF)
   deallocate(IOF%flux_sw_ocn)
   deallocate(IOF%lprec_ocn_top, IOF%fprec_ocn_top)
   deallocate(IOF%flux_u_ocn, IOF%flux_v_ocn, IOF%flux_salt)
+  deallocate(IOF%snow_to_ocn, IOF%enth_to_ocn, IOF%water_to_ocn)
 
   deallocate(IOF%Enth_Mass_in_atm, IOF%Enth_Mass_out_atm)
   deallocate(IOF%Enth_Mass_in_ocn, IOF%Enth_Mass_out_ocn)
@@ -2159,6 +2192,9 @@ subroutine IOF_chksum(mesg, IOF, G)
   type(SIS_hor_grid_type),   intent(inout) :: G  !< The ice-model's horizonal grid type.
 
   call hchksum(IOF%flux_salt, trim(mesg)//" IOF%flux_salt", G%HI)
+  call hchksum(IOF%snow_to_ocn, trim(mesg)//" IOF%snow_to_ocn", G%HI)
+  call hchksum(IOF%enth_to_ocn, trim(mesg)//" IOF%enth_to_ocn", G%HI)
+  call hchksum(IOF%water_to_ocn, trim(mesg)//" IOF%water_to_ocn", G%HI)
 
   call hchksum(IOF%flux_sh_ocn_top, trim(mesg)//"  IOF%flux_sh_ocn_top", G%HI)
   call hchksum(IOF%evap_ocn_top, trim(mesg)//"  IOF%evap_ocn_top", G%HI)
@@ -2215,6 +2251,9 @@ subroutine FIA_chksum(mesg, FIA, G, check_ocean)
 
   call hchksum(FIA%tmelt, trim(mesg)//" FIA%tmelt", G%HI)
   call hchksum(FIA%bmelt, trim(mesg)//" FIA%bmelt", G%HI)
+  call hchksum(FIA%h2o_ocn_to_ice, trim(mesg)//" FIA%h2o_ocn_to_ice", G%HI)
+  call hchksum(FIA%salt_ocn_to_ice, trim(mesg)//" FIA%salt_ocn_to_ice", G%HI)
+  call hchksum(FIA%heat_ice_to_ocn, trim(mesg)//" FIA%heat_ice_to_ocn", G%HI)
   call hchksum(FIA%sw_abs_ocn, trim(mesg)//" FIA%sw_abs_ocn", G%HI)
 
   call hchksum(FIA%WindStr_x, trim(mesg)//" FIA%WindStr_x", G%HI)

@@ -90,8 +90,8 @@ contains
 ! transport - do ice transport and thickness class redistribution              !
 !~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~!
 subroutine ice_transport(part_sz, mH_ice, mH_snow, mH_pond, uc, vc, TrReg, &
-                         dt_slow, G, IG, CS, rdg_hice, snow2ocn, &
-                         rdg_rate, rdg_open, rdg_vosh)
+                         dt_slow, G, IG, CS, rdg_hice, snow2ocn, enth2ocn, &
+                         water2ocn, rdg_rate, rdg_open, rdg_vosh)
   type(SIS_hor_grid_type),                      intent(inout) :: G
   type(ice_grid_type),                          intent(inout) :: IG
   real, dimension(SZI_(G),SZJ_(G),0:SZCAT_(IG)), intent(inout) :: part_sz
@@ -103,6 +103,8 @@ subroutine ice_transport(part_sz, mH_ice, mH_snow, mH_pond, uc, vc, TrReg, &
   type(SIS_transport_CS),                       pointer       :: CS
   real, dimension(SZI_(G),SZJ_(G),SZCAT_(IG)),  intent(inout) :: rdg_hice
   real, dimension(SZI_(G),SZJ_(G)),             intent(inout) :: snow2ocn ! snow volume [m] dumped into ocean during ridging
+  real, dimension(SZI_(G),SZJ_(G)),             intent(inout) :: enth2ocn ! snow enth. [J/m2] dumped into ocean during ridging
+  real, dimension(SZI_(G),SZJ_(G)),             intent(inout) :: water2ocn ! pond [kg/m2] dumped into ocean during ridging
   real, dimension(SZI_(G),SZJ_(G)),             intent(inout) :: rdg_rate
   real, dimension(SZI_(G),SZJ_(G)),             intent(inout) :: rdg_open ! formation rate of open water due to ridging
   real, dimension(SZI_(G),SZJ_(G)),             intent(inout) :: rdg_vosh ! rate of ice volume shifted from level to ridged ice
@@ -339,9 +341,12 @@ subroutine ice_transport(part_sz, mH_ice, mH_snow, mH_pond, uc, vc, TrReg, &
     part_sz(i,j,0) = 1.0-ice_cover(i,j)
   enddo ; enddo
 
-  ! Compress the ice where the fractional coverage exceeds 1, starting with
-  ! ridging scheme.  A more complete ridging scheme would also compress
-  ! thicker ice and allow the fractional ice coverage to drop below 1.
+  if ( CS%do_ridging ) then
+    ! Ridge the ice (Icepack scheme);
+    call ice_ridging(part_sz, mca_ice, mca_snow, mca_pond, mH_ice, mH_snow, mH_pond, &
+                     TrReg, G, IG, dt_slow, uc, vc, snow2ocn, enth2ocn, water2ocn)
+  endif
+  ! Compress the ice, thin to thick, where the total cover > 1 (SIS scheme)
   call compress_ice(part_sz, mca_ice, mca_snow, mca_pond, &
                     mH_ice, mH_snow, mH_pond, TrReg, G, IG, CS)
 
