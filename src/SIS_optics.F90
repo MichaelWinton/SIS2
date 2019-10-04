@@ -32,8 +32,9 @@ type, public :: SIS_optics_CS ; private
                           ! within the sea-ice and snow.
 
   logical :: do_pond = .false. ! activate melt pond scheme - mw/new
-  real :: max_pond_frac = 0.3  ! pond water beyond this is dumped
-  real :: min_pond_frac = 0.2  ! ponds below sea level don't drain
+  real :: del_p = 0.8          ! pond depth to area ratio (m)
+  real :: r_sat = 0.15         ! ratio of liquid to liquid+snow water that can
+                               ! be held in snow without forming pond
 
   logical :: slab_optics = .false. ! If true use the very old slab ice optics
                                    ! from the supersource model.
@@ -90,13 +91,11 @@ subroutine SIS_optics_init(param_file, CS, slab_optics)
   call get_param(param_file, mdl, "DO_POND", CS%do_pond, &
                  "If true, calculate melt ponds and use them for\n"//&
                  "shortwave radiation calculation.", default=.false.)
-  call get_param(param_file, mdl, "MIN_POND_FRAC", CS%min_pond_frac, &
-                 "Minimum melt pond cover (by ponds at sea level)\n"//&
-                 "pond drains to this when ice is porous.", default=0.2)
-  call get_param(param_file, mdl, "MAX_POND_FRAC", CS%max_pond_frac, &
-                 "Maximum melt pond cover - associated with pond volume\n"//&
-                 "that suppresses ice top to waterline", default=0.5)
-
+  call get_param(param_file, mdl, "DEL_P", CS%del_p, &
+                 "Ratio of pond depth to pond area fraction (m)", default=0.8)
+  call get_param(param_file, mdl, "R_SAT", CS%r_sat, &
+                 "Ratio of liquid to liquid+snow water that can be\n"//&
+                 "held in snow without forming radiative pond", default=0.15)
   call get_param(param_file, mdl, "ICE_DELTA_EDD_R_ICE", deltaEdd_R_ice, &
                  "A dreadfully documented tuning parameter for the radiative \n"//&
                  "propeties of sea ice with the delta-Eddington radiative \n"//&
@@ -245,7 +244,7 @@ subroutine ice_optics_SIS2(hp, hs, hi, ts, tfw, NkIce, albedos, abs_sfc, &
     albsno  , & ! snow albedo, for history
     albpnd      ! pond albedo, for history
 
-  real (kind=dbl_kind) :: max_hp, hs_mask_pond, pond_decr
+  real (kind=dbl_kind) :: r_p, hmx, tmp
 
   nb = size(albedos)
 
@@ -304,28 +303,30 @@ subroutine ice_optics_SIS2(hp, hs, hi, ts, tfw, NkIce, albedos, abs_sfc, &
       call get_SIS2_thermo_coefs(ITV, rho_ice=rho_ice, rho_snow=rho_snow, &
                                  rho_water=rho_water)
 
-      if (hp > 0.0) then
-        max_hp = (Rho_water-Rho_ice)*hi/Rho_water  ! max pond allowed by waterline
-        fp(1,1) = CS%max_pond_frac*sqrt(min(1.0,hp/max_hp))
-        ! set average pond depth for radiation
-        hprad(1,1) = hp/fp(1,1)
-        fs(1,1) = fs(1,1)*(1-fp(1,1)) ! reduce fs to frac of pond-free ice
-      else
+      if (hp > 0.0001) then ! less than .1 mm has no radiative effect
+        fp(1,1) = sqrt(min(1.0,hp/CS%del_p)) ! using CESM/SHEBA rule
+        hprad(1,1) = hp/fp(1,1) ! set average pond depth for radiation
+
+        ! snow masking: 1st for water held in snow; 2nd for water based on ice
+        r_p = rho_water*hp/(rho_water*hp+rho_snow*hs)
+        if (r_p < CS%r_sat) then ! all "pond" water held in snow: no rad. effect
+          fp(1,1) = 0.0          ! probably should use to reduce snow albedo
+          hprad(1,1) = 0.0
+        else ! pond water base on sea ice
+          hmx = hs*(rho_water - rho_snow)/rho_water
+          tmp = max(0.0, sign(1.0, hprad(1,1)-hmx)) ! 1 if hprad>=hmx, else 0
+          hprad(1,1) = (rho_water*hprad(1,1) + rho_snow*hs*tmp) &
+                     / (rho_water - rho_snow*(1.0-tmp))
+          vsno (1,1) = hs - hprad(1,1)*fp(1,1)*(1.0-tmp)
+          hprad(1,1) = hprad(1,1) * tmp
+          fp(1,1)    = fp(1,1)    * tmp
+        endif
+        fs(1,1) = min(fs(1,1),1-fp(1,1))
+      else ! pond to small for rad. effect
         fp(1,1) = 0.0
         hprad(1,1) = 0.0
       endif
-      ! decrement fp (increment fs) for snow masking of pond: pond is completely
-      ! masked when snow depth contains 2*average_pond_depth in its pore space
-      if (hs>0.0 .and. hprad(1,1)>0.0) then
-        hs_mask_pond = 2*hprad(1,1)*Rho_ice/(Rho_ice-Rho_snow)
-        pond_decr = fp(1,1)*min(1.0,hs/hs_mask_pond)
-        fp(1,1) = fp(1,1) - pond_decr
-        fs(1,1) = fs(1,1) + pond_decr
-      endif
-if (fp(1,1)<0.0 .or. fp(1,1)>1.0 .or. hprad(1,1)<0.0 .or. hprad(1,1)>hi .or. &
-fs(1,1)<0.0 .or. fs(1,1)>1.0 .or. (fs(1,1)+fp(1,1))>1.0) &
-print *,'BAD POND OPTICS fp/fs/hprad=',fp(1,1),fs(1,1),hprad(1,1)
-    else
+    else ! do_pond = .false.
       call shortwave_dEdd0_set_pond(nx_block, ny_block, icells, indxi, indxj, &
                aice, Tsfc, fs, fp, hprad) ! out: fp, hprad
     endif
